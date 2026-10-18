@@ -1,0 +1,23 @@
+# Build output
+build/
+target/
+*.bin
+*.elf
+*.map
+*.hex
+
+# ESP-IDF
+sdkconfig
+!sdkconfig.defaults
+sdkconfig.old
+dependencies.lock
+managed_components/
+
+# Tooling & editors
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+*.swp
+*.bak
+.DS_Store
