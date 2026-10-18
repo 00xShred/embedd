@@ -16,12 +16,14 @@
 #include <esp_netif.h>
 #include <esp_event.h>
 #include <esp_wifi.h>
+#include <esp_mac.h>
+
 #include <sys/types.h>
 
 #include <driver/gpio.h>
 
+
 static const char *TAG = "main";
-static volatile uint32_t s_packet_count = 0;
 
 // Packet counters struct.
 // Why 'volatile'? The Wi-Fi callback updates these in the background,
@@ -37,6 +39,8 @@ typedef struct {
 
 static wifi_stats_t s_stats = {0};
 
+// Channel the hopper task is on right now. Written by the hopper,
+// read by the dashboard and the alert. volatile for the same reason as the stats.
 static volatile uint8_t s_current_channel = 1;
 
 // NVS = Non-Volatile Storage (flash memory).
@@ -69,48 +73,78 @@ void init_event_loop(void) {
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 }
 
-// Callback invoked by Wi-Fi driver task whenever radio catches a frame.
-// WARNING: Runs in high-priority driver context. Keep it fast. No heavy blocking/printf here.
+// Callback invoked by the Wi-Fi driver whenever the radio catches a frame.
+// Runs inside the driver's high-priority task, so keep it fast.
+// Only the rare deauth alert prints here.
 static void sniffer_packet_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
     const wifi_promiscuous_pkt_t *p = (const wifi_promiscuous_pkt_t *)buf;
 
-    // Standard 802.11 MAC header is minimum 24 bytes:
-    // Frame Control (2B) + Duration (2B) + 3x MAC addrs (18B) + SeqCtrl (2B).
-    // Drop anything shorter to prevent buffer over-read.
+    // Drop corrupted frames (failed checksum = radio noise).
+    // Noise has random bits, and sometimes they look like a deauth by accident.
+    // That is what the fake "deauths" with crazy reason codes were.
+    if (p->rx_ctrl.rx_state != 0) {
+        return;
+    }
+
+    // Drop runts. A real 802.11 header is at least 24 bytes:
+    // Frame Control (2) + Duration (2) + 3 MAC addrs (18) + Sequence (2).
+    // Also stops us reading past the end of the buffer.
     if (p->rx_ctrl.sig_len < 24) {
         return;
     }
 
-    // Byte 0 contains: [Bits 7..4: Subtype] [Bits 3..2: Type] [Bits 1..0: Version]
-    // 1. Shift right by 2 to align Type to bit 0. Mask with 0x03 (0b00000011) to isolate 2 bits.
-    //    Type 0 = Management, 1 = Control, 2 = Data.
-    uint8_t frame_type = (p->payload[0] >> 2) & 0x03;
-
-    // 2. Shift right by 4 to align Subtype. Mask with 0x0F (0b00001111) to isolate 4 bits.
-    uint8_t subtype = (p->payload[0] >> 4) & 0x0F;
-
     s_stats.total++;
 
-    switch (frame_type) {
-        case 0: // Management frame
-            s_stats.mgmt++;
-            // Subtype 0x0C (12 decimal) = Deauthentication frame.
-            // Often spoofed by attackers to force clients to reconnect so they can grab WPA2 handshakes.
-            if (subtype == 0x0C) {
-                s_stats.deauth++;
-            }
-            break;
-        case 1: // Control frame (ACK, RTS, CTS)
-            s_stats.ctrl++;
-            break;
-        case 2: // Data frame (encrypted user traffic)
-            s_stats.data++;
-            break;
-        default:
-            break;
+    // The driver already tells us the frame family via 'type',
+    // so data and control frames just get counted and we leave.
+    if (type == WIFI_PKT_DATA) {
+        s_stats.data++;
+        return;
+    }
+    if (type == WIFI_PKT_CTRL) {
+        s_stats.ctrl++;
+        return;
+    }
+    if (type != WIFI_PKT_MGMT) {
+        return; // MISC (MIMO etc.), ignore
     }
 
-    s_packet_count++;
+    // From here on it is a clean management frame.
+    s_stats.mgmt++;
+
+    // Byte 0 = [subtype: bits 7..4][type: bits 3..2][version: bits 1..0]
+    // >> 4 moves the subtype to the bottom, & 0x0F keeps only those 4 bits.
+    uint8_t subtype = (p->payload[0] >> 4) & 0x0F;
+
+    // Subtype 0x0C (12) = deauthentication: "you are disconnected".
+    // Attackers spoof these to kick people off so they can grab the WPA2 handshake.
+    if (subtype == 0x0C) {
+        s_stats.deauth++;
+
+        const uint8_t *victim = &p->payload[4];  // Addr1: who receives it
+        const uint8_t *sender = &p->payload[10]; // Addr2: who claims to send it (can be spoofed)
+        const uint8_t *bssid  = &p->payload[16]; // Addr3: the router's MAC
+
+        // Reason code: 2 bytes, little-endian (low byte first), at bytes 24-25.
+        // Real values are small, like 1, 2, 3, 7.
+        uint16_t reason = 0;
+        if (p->rx_ctrl.sig_len >= 26) {
+            reason = p->payload[24] | (p->payload[25] << 8);
+        }
+
+        // Use our own channel variable. rx_ctrl.channel read 0 on this chip.
+        printf("\n[!] DEAUTH DETECTED [CH %2u | RSSI %d dBm]\n"
+               "    Sender : " MACSTR "\n"
+               "    Victim : " MACSTR "\n"
+               "    BSSID  : " MACSTR "\n"
+               "    Reason : %u\n\n",
+               s_current_channel,
+               p->rx_ctrl.rssi,
+               MAC2STR(sender),
+               MAC2STR(victim),
+               MAC2STR(bssid),
+               reason);
+    }
 }
 
 void init_wifi(void) {
@@ -194,6 +228,6 @@ void app_main (void) {
         }
 
         printf("[CH %2u] Total: %lu | Mgmt: %lu (Deauth: %lu) | Data: %lu | Ctrl: %lu\n",
-          s_current_channel, s_stats.total, s_stats.mgmt, s_stats.deauth, s_stats.data, s_stats.ctrl);
+               s_current_channel, s_stats.total, s_stats.mgmt, s_stats.deauth, s_stats.data, s_stats.ctrl);
     }
 }
