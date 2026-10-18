@@ -37,6 +37,8 @@ typedef struct {
 
 static wifi_stats_t s_stats = {0};
 
+static volatile uint8_t s_current_channel = 1;
+
 // NVS = Non-Volatile Storage (flash memory).
 // We don't save sniffed packets to flash (that would kill the chip).
 // But Espressif's Wi-Fi driver refuses to start without NVS because it stores
@@ -151,6 +153,19 @@ void init_led(void) {
     gpio_set_level(GPIO_NUM_8, 1); // Start with LED OFF
 }
 
+// Dedicated FreeRTOS background task for channel sweeping.
+// FreeRTOS tasks run concurrently and must never return (infinite loop).
+// We hop every 100ms through channels 1..13 to capture traffic across the whole 2.4GHz band.
+void channel_hopper_task(void *pvParameters) {
+    uint8_t ch = 1;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(100)); // Dwell time: 100ms per channel
+        ch = (ch % 13) + 1;             // Cycles 1 -> 2 -> ... -> 13 -> 1
+        s_current_channel = ch;
+        esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    }
+}
+
 // app_main is spawned by FreeRTOS as an initial task.
 void app_main (void) {
     init_nvs();
@@ -160,6 +175,10 @@ void app_main (void) {
     init_led();
 
     static uint32_t last_deauth = 0;
+
+    // Spawn channel hopper as a background thread:
+    // Stack: 2048 bytes | Priority: 1 (low/background)
+    xTaskCreate(channel_hopper_task, "channel_hopper_task", 2048, NULL, 1, NULL);
 
     // Dashboard loop: prints stats once per second.
     // vTaskDelay yields CPU to FreeRTOS scheduler so other tasks (Wi-Fi driver) can run.
@@ -174,7 +193,7 @@ void app_main (void) {
             last_deauth = s_stats.deauth;
         }
 
-        printf("[CH 1] Total: %lu | Mgmt: %lu (Deauth: %lu) | Data: %lu | Ctrl: %lu\n",
-               s_stats.total, s_stats.mgmt, s_stats.deauth, s_stats.data, s_stats.ctrl);
+        printf("[CH %2u] Total: %lu | Mgmt: %lu (Deauth: %lu) | Data: %lu | Ctrl: %lu\n",
+          s_current_channel, s_stats.total, s_stats.mgmt, s_stats.deauth, s_stats.data, s_stats.ctrl);
     }
 }
