@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/projdefs.h"
 #include "freertos/task.h"
+#include "hal/gpio_types.h"
 #include "nvs.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -16,6 +17,8 @@
 #include <esp_event.h>
 #include <esp_wifi.h>
 #include <sys/types.h>
+
+#include <driver/gpio.h>
 
 static const char *TAG = "main";
 static volatile uint32_t s_packet_count = 0;
@@ -140,17 +143,37 @@ void init_wifi(void) {
     esp_wifi_set_promiscuous(true);
 }
 
+// Configure onboard Blue LED (GPIO 8).
+// Super Mini LED is Active LOW: 0 = ON, 1 = OFF.
+void init_led(void) {
+    gpio_reset_pin(GPIO_NUM_8);
+    gpio_set_direction(GPIO_NUM_8, GPIO_MODE_OUTPUT);
+    gpio_set_level(GPIO_NUM_8, 1); // Start with LED OFF
+}
+
 // app_main is spawned by FreeRTOS as an initial task.
 void app_main (void) {
     init_nvs();
     init_netif();
     init_event_loop();
     init_wifi();
+    init_led();
+
+    static uint32_t last_deauth = 0;
 
     // Dashboard loop: prints stats once per second.
     // vTaskDelay yields CPU to FreeRTOS scheduler so other tasks (Wi-Fi driver) can run.
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+
+        // Physical alert: if deauth count grew this second, blink the blue LED for 100ms
+        if (s_stats.deauth > last_deauth) {
+            gpio_set_level(GPIO_NUM_8, 0); // LED ON
+            vTaskDelay(pdMS_TO_TICKS(100)); // Visible flash
+            gpio_set_level(GPIO_NUM_8, 1); // LED OFF
+            last_deauth = s_stats.deauth;
+        }
+
         printf("[CH 1] Total: %lu | Mgmt: %lu (Deauth: %lu) | Data: %lu | Ctrl: %lu\n",
                s_stats.total, s_stats.mgmt, s_stats.deauth, s_stats.data, s_stats.ctrl);
     }
