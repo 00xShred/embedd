@@ -65,9 +65,9 @@ Exit monitor: `Ctrl+]`. Flash won't connect? Hold `BOOT`, tap `RESET`, release `
 
 Features I want to tackle next:
 
-- **Beacon/SSID logger** — parse TLV information elements to list networks by name #1
-- **PCAP stream** — stream raw frames into Wireshark over USB (teaches FreeRTOS queues, producer/consumer) #3
-- **Deauth transmit test** — second ESP32-C3 plays attacker against my own router, detector catches it end-to-end #2
+- **Beacon/SSID logger** — parse TLV information elements to list networks by name
+- **PCAP stream** — stream raw frames into Wireshark over USB (teaches FreeRTOS queues, producer/consumer)
+- **Deauth transmit test** — second ESP32-C3 plays attacker against my own router, detector catches it end-to-end
 
 ## References
 
